@@ -1,11 +1,26 @@
 #include "stable_id_vector_fwd.hpp"
 
+#include <glog/logging.h>
+
 namespace sparks {
 
 template<typename ElemType, typename IdType, uint8_t OUTER_BITS>
 BasicStableIdVector<ElemType, IdType, OUTER_BITS>::BasicStableIdVector(
     size_type capacity) {
-  reserve_ids(capacity);
+  reserve(capacity);
+}
+
+template<typename ElemType, typename IdType, uint8_t OUTER_BITS>
+BasicStableIdVector<ElemType, IdType, OUTER_BITS>::~BasicStableIdVector() {
+  size_type remaining = size_;
+  for (IdType i = 0; i < entries_.size(); ++i) {
+    if ((entries_[i].id & OUTER_MASK) == i) {
+      LOG(INFO) << this << ": " << entries_[i].id << " " << i;
+      reinterpret_cast<value_type*>(entries_[i].data)->~value_type();
+      --remaining;
+    }
+  }
+  DCHECK_EQ(remaining, 0);
 }
 
 template<typename ElemType, typename IdType, uint8_t OUTER_BITS>
@@ -27,7 +42,8 @@ void BasicStableIdVector<ElemType, IdType, OUTER_BITS>::reserve(
 template <typename ElemType, typename IdType, uint8_t OUTER_BITS>
 bool BasicStableIdVector<ElemType, IdType, OUTER_BITS>::is_valid_id(
     Id id) const {
-  return (id & INNER_MASK) == (entries_[id & OUTER_MASK].id & INNER_BITS);
+  auto outer_id = id & OUTER_MASK;
+  return outer_id < entries_.size() && (id == entries_[outer_id].id);
 }
 
 template<typename ElemType, typename IdType, uint8_t OUTER_BITS>
@@ -38,16 +54,19 @@ typename BasicStableIdVector<ElemType, IdType, OUTER_BITS>::Id
   if (last_free_ == INVALID_INDEX) {
     DCHECK_EQ(first_free_, INVALID_INDEX);
     outer_id = entries_.size();
-    entries_.insert();
+    entries_.emplace_back();
+    DCHECK_LE(outer_id, entries_.size());
   } else {
     DCHECK_NE(first_free_, INVALID_INDEX);
     outer_id = first_free_;
-    first_free_ = entries_[first_free_].id;
+    DCHECK_LE(outer_id, entries_.size());
+    first_free_ = entries_[first_free_].id & OUTER_MASK;
     if (first_free_ == INVALID_INDEX) last_free_ = INVALID_INDEX;
   }
 
   new (reinterpret_cast<value_type*>(entries_[outer_id].data)) value_type(
       std::forward<Args>(args)...);
+  ++size_;
 
   return entries_[outer_id].id =
              (entries_[outer_id].id & INNER_MASK) | outer_id;
@@ -67,9 +86,12 @@ const ElemType& BasicStableIdVector<ElemType, IdType, OUTER_BITS>::operator[](
   DCHECK_LT(outer_id, entries_.size()) << "Index out of bounds.";
 
   auto& entry = entries_[outer_id];
-  CHECK_EQ(entry.id, id) << "Stale index used.";
+  CHECK_EQ(entry.id, id)
+      << "Stale index used outers " << (entry.id & OUTER_MASK) << " vs. "
+      << outer_id << ", inners: " << ((entry.id & INNER_MASK) >> OUTER_BITS)
+      << " vs. " << ((id & INNER_MASK) >> OUTER_BITS);
 
-  return *reinterpret_cast<value_type*>(entry.data);
+  return *reinterpret_cast<const value_type*>(entry.data);
 }
 
 template<typename ElemType, typename IdType, uint8_t OUTER_BITS>
@@ -96,6 +118,8 @@ void BasicStableIdVector<ElemType, IdType, OUTER_BITS>::erase(Id freed_id) {
     entries_[last_free_].id &= INNER_MASK | outer_freed_id;
     last_free_ = outer_freed_id;
   }
+
+  --size_;
 }
 
 }  // namespace sparks

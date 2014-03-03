@@ -5,7 +5,6 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
-#include <type_traits>
 
 #include <glog/logging.h>
 

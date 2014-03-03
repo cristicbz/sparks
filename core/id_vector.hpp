@@ -39,12 +39,14 @@ void BasicIdVector<ElemType, IdType, OUTER_BITS>::reserve_elements(
   reserve_ids(new_size);
 }
 
-template<typename ElemType, typename IdType, uint8_t OUTER_BITS>
+template<typename ElemType, typename IdType, uint8_t OUTER_BITS> inline
 bool BasicIdVector<ElemType, IdType, OUTER_BITS>::is_valid_id(Id id) const {
-  return (id & INNER_MASK) == (outer_to_index_[id & OUTER_MASK] & INNER_MASK);
+  auto outer_id = id & OUTER_MASK;
+  return outer_id < outer_to_index_.size() &&
+         (id & INNER_MASK) == (outer_to_index_[outer_id] & INNER_MASK);
 }
 
-template<typename ElemType, typename IdType, uint8_t OUTER_BITS>
+template<typename ElemType, typename IdType, uint8_t OUTER_BITS> inline
 typename BasicIdVector<ElemType, IdType, OUTER_BITS>::Id BasicIdVector<
     ElemType, IdType, OUTER_BITS>::id_from_iterator(const_iterator iter) const {
   DCHECK(iter <= elements_.end());
@@ -54,8 +56,16 @@ typename BasicIdVector<ElemType, IdType, OUTER_BITS>::Id BasicIdVector<
   return (outer_to_index_[outer_id] & INNER_MASK) | outer_id;
 }
 
+template <typename ElemType, typename IdType, uint8_t OUTER_BITS> inline
+typename BasicIdVector<ElemType, IdType, OUTER_BITS>::Id
+BasicIdVector<ElemType, IdType, OUTER_BITS>::id_from_pointer(
+    const ElemType* pointer) const {
+  DCHECK(!elements_.empty() && ((pointer - &elements_[0]) <= elements_.size()));
+  return id_from_iterator(elements_.begin() + (pointer - &elements_.front()));
+}
+
 template<typename ElemType, typename IdType, uint8_t OUTER_BITS>
-template<typename... Args>
+template<typename... Args> inline
 typename BasicIdVector<ElemType, IdType, OUTER_BITS>::Id
     BasicIdVector<ElemType, IdType, OUTER_BITS>::emplace(Args&&... args) {
   const auto id = create_id();
@@ -65,7 +75,7 @@ typename BasicIdVector<ElemType, IdType, OUTER_BITS>::Id
 }
 
 template<typename ElemType, typename IdType, uint8_t OUTER_BITS>
-typename BasicIdVector<ElemType, IdType, OUTER_BITS>::Id
+typename BasicIdVector<ElemType, IdType, OUTER_BITS>::Id inline
     BasicIdVector<ElemType, IdType, OUTER_BITS>::insert(
         const value_type &value) {
   const auto id = create_id();
@@ -74,26 +84,26 @@ typename BasicIdVector<ElemType, IdType, OUTER_BITS>::Id
   return id;
 }
 
-template<typename ElemType, typename IdType, uint8_t OUTER_BITS>
+template<typename ElemType, typename IdType, uint8_t OUTER_BITS> inline
 void BasicIdVector<ElemType, IdType, OUTER_BITS>::erase(Id id) {
   free_id(id);
 }
 
-template<typename ElemType, typename IdType, uint8_t OUTER_BITS>
+template<typename ElemType, typename IdType, uint8_t OUTER_BITS> inline
 ElemType& BasicIdVector<ElemType, IdType, OUTER_BITS>::operator[](Id id) {
   return const_cast<value_type&>(
       const_cast<const BasicIdVector<ElemType, IdType, OUTER_BITS> &>(
           *this)[id]);
 }
 
-template<typename ElemType, typename IdType, uint8_t OUTER_BITS>
+template<typename ElemType, typename IdType, uint8_t OUTER_BITS> inline
 const ElemType& BasicIdVector<ElemType, IdType, OUTER_BITS>::operator[](
     Id id) const {
   auto outer_id = id & OUTER_MASK;
-  CHECK_LT(outer_id, outer_to_index_.size()) << "Index out of bounds.";
+  DCHECK_LT(outer_id, outer_to_index_.size()) << "Index out of bounds.";
 
   auto& entry = outer_to_index_[outer_id];
-  CHECK_EQ(entry & INNER_MASK, id & INNER_MASK) << "Stale index used.";
+  DCHECK_EQ(entry & INNER_MASK, id & INNER_MASK) << "Stale index used.";
 
   auto element_index = entry & OUTER_MASK;
   DCHECK_LT(element_index, elements_.size());
@@ -101,38 +111,6 @@ const ElemType& BasicIdVector<ElemType, IdType, OUTER_BITS>::operator[](
 
   return elements_[element_index];
 }
-
-//std::string dump() {
-//  std::stringstream ss;
-
-//  ss << "\nElems: ";
-//  for (auto i = 0 ; i < elements_.size(); ++i) {
-//    ss << elements_[i] << "[" << index_to_outer_[i] << "]  ";
-//  }
-
-//  std::vector<char> tags(outer_to_index_.size(), '>');
-
-//  auto free_ptr = first_free_;
-//  while (free_ptr != INVALID_INDEX) {
-//    if (free_ptr == first_free_) tags[free_ptr] = 'S';
-//    else if (free_ptr == last_free_) tags[free_ptr] = 'E';
-//    else tags[free_ptr] = 'F';
-//    free_ptr = outer_to_index_[free_ptr] & OUTER_MASK;
-//  }
-
-
-//  ss << "\nO2I:";
-//  for (auto i = 0 ; i < outer_to_index_.size(); ++i) {
-//    auto id = outer_to_index_[i];
-//    ss << "\t " << i << "...." << tags[i];
-//    ss << " [" << ((id & INNER_MASK) >> 24) << ", " << (id & OUTER_MASK)
-//       << "]";
-//    if (tags[i] == '>') ss << " = " << elements_[id & OUTER_MASK];
-//    ss << '\n';
-//  }
-
-//  return ss.str();
-//}
 
 template<typename ElemType, typename IdType, uint8_t OUTER_BITS>
 typename BasicIdVector<ElemType, IdType, OUTER_BITS>::Id
@@ -180,7 +158,8 @@ void BasicIdVector<ElemType, IdType, OUTER_BITS>::free_id(Id freed_id) {
 
   // Add freed entry at the end of free list and mark it as end-of-list.
   freed_entry =
-      (((freed_entry & INNER_MASK) + (1<<OUTER_BITS)) & INNER_MASK) | OUTER_MASK;
+      (((freed_entry & INNER_MASK) + (1 << OUTER_BITS)) & INNER_MASK) |
+      OUTER_MASK;
   if (last_free_ == INVALID_INDEX) {
     DCHECK_EQ(first_free_, INVALID_INDEX);
     last_free_ = first_free_ = outer_freed_id;  // List was empty.

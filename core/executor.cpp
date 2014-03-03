@@ -1,224 +1,153 @@
 #include "executor.hpp"
 
-#include "id_vector.hpp"
-
+#include <thread>
 #include <glog/logging.h>
 
 namespace sparks {
 
-Executor::Executor() : tasks_{64, 64} {
-  //for (ThreadId i_queue = 0; i_queue < MAX_THREADS; ++i_queue) {
-  //  per_thread_queue_[i_queue].first = INVALID_TASK;
-  //  per_thread_queue_[i_queue].last = INVALID_TASK;
-  //}
-}
-
-void Executor::stop() {
-  std::unique_lock<std::mutex> lock{mutex_};
-  if (stopped_) return;
-
-  auto tasks_remaining = num_scheduled_tasks_.count();
-  if (tasks_remaining > 0) {
-    LOG(INFO) << num_scheduled_tasks_.count()
-              << " tasks remaining, clearing queues...";
-    clear_queue(main_queue_);
-    for (ThreadId i_queue = 0; i_queue < MAX_THREADS; ++i_queue) {
-      clear_queue(per_thread_queue_[i_queue]);
-    }
-  } else {
-    LOG(INFO) << "No tasks reminaing.";
+Executor::Executor() : tasks_{16}, dependents_{16} {
+  // Initialise affinity task queues to empty task lists.
+  for (unsigned i = 0; i < MAX_THREADS; ++i) {
+    affinity_task_queue_[i].front = affinity_task_queue_[i].back = INVALID_TASK;
+    thread_exists_for_affinity_[i] = false;
   }
-  num_scheduled_tasks_.wait_and_disable();
-
-  LOG(INFO) << "Signalling " << (active_threads_blocking_counter_.count() - 1)
-            << " threads to stop.";
-  stopped_ = true;
-  num_sleeping_threads_ = 0;
-  lock.unlock();
-  not_empty_condition_.notify_all();
-
-  LOG(INFO) << "Waiting on threads...";
-  active_threads_blocking_counter_.wait_and_disable();
-
-  // Check that cleanup was successful.
-  CHECK_EQ(num_sleeping_threads_, 0);
-  CHECK(empty(main_queue_));
-  for (ThreadId i_queue = 0; i_queue < MAX_THREADS; ++i_queue) {
-    CHECK(!handled_affinities[i_queue]) << i_queue;
-    CHECK(empty(per_thread_queue_[i_queue])) << i_queue;
-  }
-  CHECK_EQ(tasks_.size(), 0);
-  LOG(INFO) << "All post-conditions check out, finalising destruction. "
-            << " A total of " << next_task_stamp_ << " tasks were ran, with "
-            << "never more than " << tasks_.capacity() << " queued.";
 }
 
 Executor::~Executor() {
-  num_scheduled_tasks_.wait_and_disable();
-  stop();
+  close_and_wait();
 }
 
-void Executor::clear_queue(TaskList& queue) {
-  uint32_t num_removed_tasks = 0;
-  while (queue.first != INVALID_TASK) {
-    DCHECK(tasks_.is_valid_id(queue.first));
-    auto remove = queue.first;
-    queue.first = tasks_[queue.first].next_task;
-    tasks_.erase(remove);
-    ++num_removed_tasks;
-  }
-  queue.last = INVALID_TASK;
-  num_scheduled_tasks_.decrement(num_removed_tasks);
-}
+void Executor::run_tasks_no_affinity() {
+  if (closed_) return;
 
-void Executor::pop_and_run(std::unique_lock<std::mutex>& lock,
-                           TaskList& queue) {
-  pop_and_run(lock, queue, tasks_[queue.first]);
-}
+  std::unique_lock<Mutex> lock{tasks_mutex_};
+  BlockingCounter::Item running_thread{num_threads_};
 
-void Executor::pop_and_run(std::unique_lock<std::mutex>& lock, TaskList& queue,
-                           Task& task) {
-  DCHECK(!empty(queue));
-  DCHECK(tasks_.is_valid_id(queue.first));
-  DCHECK(&tasks_[queue.first] == &task);
-
-  // Move closure to a local variable then remove from task vector
-  auto task_id = queue.first;
-  auto next_task = task.next_task;
-  auto closure = std::move(task.closure);
-  tasks_.erase(task_id);
-
-  // Pop id from task queue.
-  queue.first = next_task;
-  if (next_task == INVALID_TASK) queue.last = INVALID_TASK;
-
-  // Unlock to allow other threads to run closures and run our closure.
-  lock.unlock();
-  closure();
-  num_scheduled_tasks_.decrement();
-}
-
-bool Executor::run_one_no_affinity() {
-  std::unique_lock<std::mutex> lock{mutex_};
-  if (stopped_) return false;
-
-  // Wait on condition variable for a new element.
-  while (empty(main_queue_)) {
-    ++num_sleeping_threads_;
-    not_empty_condition_.wait(lock);
-    if (stopped_) return false;
-  }
-
-  pop_and_run(lock, main_queue_);
-  return true;
-}
-
-bool Executor::run_one_with_affinity(TaskList& thread_queue) {
-  std::unique_lock<std::mutex> lock{mutex_};
-  if (stopped_) return false;
-  bool main_empty = empty(main_queue_);
-  bool thread_empty = empty(thread_queue);
-
-  // Wait on condition variable for a an element on either queue.
-  while (main_empty && thread_empty) {
-    ++num_sleeping_threads_;
-    not_empty_condition_.wait(lock);
-    if (stopped_) return false;
-
-    main_empty = empty(main_queue_);
-    thread_empty = empty(thread_queue);
-  }
-
-  if (!(main_empty || thread_empty)) {
-    // If there's a new task on both the thread and main queue, pick the
-    // one which was added first.
-    DCHECK(tasks_.is_valid_id(main_queue_.first));
-    DCHECK(tasks_.is_valid_id(thread_queue.first));
-    auto& main_front = tasks_[main_queue_.first];
-    auto& thread_front = tasks_[thread_queue.first];
-
-    if (main_front.stamp < thread_front.stamp) {
-      pop_and_run(lock, main_queue_, main_front);
-    } else {
-      pop_and_run(lock, thread_queue, thread_front);
+  while (true) {
+    while (empty_task_list(global_task_queue_)) {
+      lock.unlock();
+      std::this_thread::yield();
+      lock.lock();
+      if (closed_) {
+        return;
+      }
     }
-  } else if (!main_empty) {
-    pop_and_run(lock, main_queue_);
-  } else if (!thread_empty) {
-    pop_and_run(lock, thread_queue);
-  }
 
-  return true;
-}
-
-void Executor::run_tasks(ThreadId with_affinity) {
-  std::unique_lock<std::mutex> lock{mutex_};
-  if (stopped_) return;
-  BlockingCounter::Item item{active_threads_blocking_counter_};
-  CHECK_LE(active_threads_blocking_counter_.count() - 1, MAX_THREADS);
-  lock.unlock();
-  if (with_affinity == NO_AFFINITY) {
-    while (run_one_no_affinity()) {
-      // Do nothing.
-    }
-  } else {
-    CHECK_LT(with_affinity, MAX_THREADS);
-    CHECK(!handled_affinities[with_affinity]);
-    handled_affinities[with_affinity] = true;
-    auto& thread_queue = per_thread_queue_[with_affinity];
-    while (run_one_with_affinity(thread_queue)) {
-      // Do nothing.
-    }
-    handled_affinities[with_affinity] = false;
+    run_task(pop_task(global_task_queue_), lock);
   }
 }
 
-void Executor::add_task(Closure closure, ThreadId affinity) {
-  DCHECK(closure);
-  std::unique_lock<std::mutex> lock{mutex_};
-  if (stopped_) return;
-
-  auto id = tasks_.emplace(std::move(closure), next_task_stamp_++);
-
-  Task& task = tasks_[id];
+void Executor::run_tasks_with_affinity(ThreadId affinity) {
+  if (closed_) return;
   if (affinity == NO_AFFINITY) {
-    add_to_queue(main_queue_, id, task);
-    if (num_sleeping_threads_ > 0) {
-      --num_sleeping_threads_;
+    run_tasks_no_affinity();
+    return;
+  }
+
+  std::unique_lock<Mutex> lock{tasks_mutex_};
+  BlockingCounter::Item running_thread{num_threads_};
+
+  CHECK(!thread_exists_for_affinity_[affinity]) << affinity;
+  thread_exists_for_affinity_[affinity] = true;
+
+  while (true) {
+    TaskList& affinity_queue = affinity_task_queue_[affinity];
+    bool global_is_empty = empty_task_list(global_task_queue_);
+    bool affinity_is_empty = empty_task_list(affinity_queue);
+    int start_sleeping{128};
+    while (global_is_empty && affinity_is_empty) {
       lock.unlock();
-      not_empty_condition_.notify_one();
+      if (--start_sleeping < 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      } else {
+        std::this_thread::yield();
+      }
+      lock.lock();
+
+      if (closed_) {
+        thread_exists_for_affinity_[affinity] = false;
+        return;
+      }
+
+      global_is_empty = empty_task_list(global_task_queue_);
+      affinity_is_empty = empty_task_list(affinity_queue);
     }
-  } else {
-    DCHECK_LT(affinity, MAX_THREADS);
-    LOG_IF(WARNING, !handled_affinities[affinity])
-        << "Task with unhandled affinity " << affinity << " added.";
-    add_to_queue(per_thread_queue_[affinity], id, task);
-    if (num_sleeping_threads_ > 0) {
-      num_sleeping_threads_ = 0;
-      lock.unlock();
-      // We notify ALL, but only the corresponding thread will pull it from
-      // its own queue, all others will go back to sleep.
-      not_empty_condition_.notify_all();
+
+    if (!(global_is_empty || affinity_is_empty)) {
+      // If both queues have tasks, pick the older one based on its stamp.
+      if (tasks_[global_task_queue_.front].stamp <
+          tasks_[affinity_queue.front].stamp) {
+        run_task(pop_task(global_task_queue_), lock);
+      } else {
+        run_task(pop_task(affinity_queue), lock);
+      }
+    } else if(global_is_empty) {
+      run_task(pop_task(affinity_queue), lock);
+    } else {
+      run_task(pop_task(global_task_queue_), lock);
     }
   }
 }
 
-void Executor::add_to_queue(TaskList& queue, TaskId id, Task& task) {
-  DCHECK(tasks_.is_valid_id(id));
-  DCHECK(&tasks_[id] == &task);
-  if (empty(queue)) {
-    queue.first = id;
-  } else {
-    tasks_[queue.last].next_task = id;
-  }
-  queue.last = id;
-  task.next_task = INVALID_TASK;
-  num_scheduled_tasks_.increment(1);
+void Executor::close() {
+  std::lock_guard<Mutex> lock{tasks_mutex_};
+  if (closed_) return;
+  closed_ = true;
 }
 
-bool Executor::empty(TaskList& queue) {
-  DCHECK_EQ(queue.first == INVALID_TASK, queue.last == INVALID_TASK);
-  return queue.first == INVALID_TASK;
+void Executor::close_and_wait() {
+  close();
+  num_threads_.wait_and_disable();
+}
+
+
+inline bool Executor::empty_task_list(const TaskList& list) {
+  DCHECK(list.front != INVALID_TASK || list.back == INVALID_TASK);
+  return list.front == INVALID_TASK;
+}
+
+Executor::Task Executor::pop_task(
+    TaskList& queue) {
+  DCHECK_NE(queue.front, INVALID_TASK);
+  DCHECK_NE(queue.back, INVALID_TASK);
+
+  TaskId task_id = queue.front;
+  Task task{std::move(tasks_[task_id])};
+
+  queue.front = task.next_in_list;
+  if (queue.front == INVALID_TASK) queue.back = INVALID_TASK;
+
+  tasks_.erase(task_id);
+  return task;
+}
+
+void Executor::run_task(Task&& task, std::unique_lock<Mutex>& lock) {
+  DCHECK_EQ(task.num_unmet_dependencies, 0);
+
+  if (task.closure) {
+    lock.unlock();
+    task.closure();
+    lock.lock();
+  }
+
+  signal_dependents(task);
+}
+
+void Executor::signal_dependents(Task& task) {
+  DependentId dependent_id = task.first_dependent;
+
+  while (dependent_id != INVALID_DEPENDENT) {
+    Dependent& dependent = dependents_[dependent_id];
+    Task& dependent_task = tasks_[dependent.from];
+    DCHECK_NE(dependent_task.num_unmet_dependencies, 0);
+    if ((--dependent_task.num_unmet_dependencies) == 0) {
+      schedule(dependent.from, dependent_task);
+    }
+
+    DependentId next_dependent_id = dependent.next;
+    dependents_.erase(dependent_id);
+    dependent_id = next_dependent_id;
+  }
 }
 
 }  // namespace sparks

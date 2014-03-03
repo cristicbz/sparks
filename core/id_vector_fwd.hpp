@@ -33,6 +33,7 @@ class BasicIdVector {
 
   inline bool is_valid_id(Id id) const;
   inline Id id_from_iterator(const_iterator iter) const;
+  inline Id id_from_pointer(const ElemType* pointer) const;
 
   template<typename ...Args>
   inline Id emplace(Args&& ...args);
@@ -69,11 +70,11 @@ class BasicIdVector {
   size_type last_free_ = INVALID_INDEX;
 };
 
-template<class ElemType>
-using IdVector32 = BasicIdVector<ElemType, uint32_t, 24>;
+template<class ElemType, uint8_t OUTER_BITS = 24>
+using IdVector32 = BasicIdVector<ElemType, uint32_t, OUTER_BITS>;
 
-template<class ElemType>
-using IdVector64 = BasicIdVector<ElemType, uint64_t, 56>;
+template<class ElemType, uint8_t OUTER_BITS = 56>
+using IdVector64 = BasicIdVector<ElemType, uint64_t, OUTER_BITS>;
 
 }  // namespace
 
