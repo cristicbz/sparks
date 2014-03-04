@@ -2,7 +2,6 @@
 
 #include <atomic>
 #include <memory>
-#include <mutex>
 #include <thread>
 #include <vector>
 #include <random>
@@ -26,9 +25,8 @@ struct Element {
 
   ~Element() {
     x = 123456789;
-    LOG_IF(INFO,
-           !suppress_diff_destroyer && creator != std::this_thread::get_id())
-        << "different destroyer";
+    EXPECT_TRUE(suppress_diff_destroyer ||
+                creator == std::this_thread::get_id()) << "different destroyer";
     global_count.fetch_sub(1); }
 
   Element(const Element&) = delete;
@@ -117,26 +115,31 @@ TEST_F(IdVectorTest, SingleThreadedAddAndRemove) {
   }
 }
 
-TEST_F(IdVectorTest, ManyThreadsAddAndRemove) {
+TEST_F(IdVectorTest, LongManyThreadsAddAndRemoveTakes15) {
   constexpr size_t MAX_IDS = 4095;
-  constexpr size_t MAX_ITER = 16384;
-  constexpr size_t MAX_THREADS = 31;
+  constexpr size_t MAX_ITER = 8192;
+  constexpr size_t NUM_THREADS[] = { 1, 2, 3, 4, 6, 9, 13, 24, 32 };
+  constexpr size_t NUM_NUM_THREADS =
+      sizeof(NUM_THREADS) / sizeof(NUM_THREADS[0]);
 
-  for (int num_threads = 1; num_threads <= MAX_THREADS; ++num_threads) {
+  for (int i_num_threads = 0; i_num_threads < NUM_NUM_THREADS;
+       ++i_num_threads) {
+    auto num_threads = NUM_THREADS[i_num_threads];
+    std::vector<std::vector<std::pair<BigVector::Id, int>>> all_ids_and_values;
+    all_ids_and_values.resize(num_threads);
+
     std::vector<std::thread> threads;
-    std::vector<std::pair<BigVector::Id, int>> all_ids_and_values[MAX_THREADS];
-    std::mutex sync;
     threads.reserve(num_threads);
-    LOG(INFO) << "Trying with " << num_threads << " threads. Iterating...";
+    VLOG(1) << "Trying with " << num_threads << " threads. Iterating...";
     Element::suppress_diff_destroyer.store(false);
     for (int i_thread = 0; i_thread < num_threads; ++i_thread) {
-      threads.emplace_back(
-          [this, &sync, &all_ids_and_values, i_thread, num_threads]{
+      threads.emplace_back([this, &all_ids_and_values, i_thread, num_threads] {
         auto& ids_and_values = all_ids_and_values[i_thread];
         const size_t max_ids =
             (i_thread < num_threads - 1)
                 ? (MAX_IDS / num_threads)
                 : (MAX_IDS - (MAX_IDS / num_threads) * (num_threads - 1));
+        ASSERT_LT(0, max_ids);
         ASSERT_EQ(0, ids_and_values.size());
         ids_and_values.reserve(MAX_IDS);
         std::minstd_rand0 gen{i_thread};
@@ -166,9 +169,6 @@ TEST_F(IdVectorTest, ManyThreadsAddAndRemove) {
             ids_and_values.pop_back();
           }
         }
-
-        sync.lock();
-        sync.unlock();
       });
     }
 
@@ -183,7 +183,7 @@ TEST_F(IdVectorTest, ManyThreadsAddAndRemove) {
     EXPECT_EQ(expected_size, big.size());
     EXPECT_EQ(expected_size, Element::count());
 
-    LOG(INFO) << "Parallel remove...";
+    VLOG(1) << "Parallel remove...";
     for (int i_thread = 0; i_thread < num_threads; ++i_thread) {
       threads.emplace_back([this, &all_ids_and_values, i_thread, num_threads]{
         for (int j_thread = 0; j_thread < num_threads; ++j_thread) {
@@ -206,7 +206,7 @@ TEST_F(IdVectorTest, ManyThreadsAddAndRemove) {
     ASSERT_EQ(0, big.size());
     ASSERT_EQ(0, Element::count());
 
-    LOG(INFO) << "Done.";
+    VLOG(1) << "Done.";
   }
 }
 

@@ -33,6 +33,13 @@ class BasicIdVector {
     init_empty();
   }
 
+  // Destruction must be synchronized: all method calls in all threads need to
+  // have finished before calling destructor.
+  ~BasicIdVector() {
+    destroy_elements();
+    delete[] slots_;
+  }
+
   // Non-copyable nor movable since it cannot be done lockfree.
   BasicIdVector(const BasicIdVector&) = delete;
   BasicIdVector(BasicIdVector&&) = delete;
@@ -40,16 +47,11 @@ class BasicIdVector {
   BasicIdVector& operator=(const BasicIdVector&) = delete;
   BasicIdVector& operator=(BasicIdVector&&) = delete;
 
-  // Destruction must be synchronized: all method calls in all threads need to
-  // have finished before calling destructor.
-  ~BasicIdVector() {
-    destroy();
-  }
 
   // Clearing must be synchronized: all method calls in all threads need to
   // have finished before calling clear().
   void unsafe_clear() {
-    destroy();
+    destroy_elements();
     init_empty();
   }
 
@@ -203,7 +205,7 @@ class BasicIdVector {
     size_.fetch_sub(1);
   }
 
-  void destroy() {
+  void destroy_elements() {
     for (IntId i_slot = 0; i_slot < CAPACITY; ++i_slot) {
       if (is_acquired(i_slot)) element_at(i_slot).~Element();
     }
