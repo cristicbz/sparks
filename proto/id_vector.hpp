@@ -4,21 +4,22 @@
 #include <atomic>
 #include <cstddef>
 #include <utility>
+#include <random>
 
 #include <glog/logging.h>
 
 namespace sparks {
 
-template<typename Element_, typename Id_, size_t INDEX_BITS>
+template<typename Element_, typename IntId_, size_t INDEX_BITS>
 class BasicIdVector {
  public:
-  static_assert(INDEX_BITS < sizeof(Id_) * 8, "too many index bits");
+  static_assert(INDEX_BITS < sizeof(IntId_) * 8, "too many index bits");
   static_assert(INDEX_BITS > 0, "zero index bits");
 
   using Element = Element_;
-  using IntId = Id_;
+  using IntId = IntId_;
 
-  enum class Id : Id_ {};
+  enum class Id : IntId_ {};
 
  private:
   static constexpr IntId INVALID {(1 << INDEX_BITS) - 1};
@@ -55,12 +56,11 @@ class BasicIdVector {
     init_empty();
   }
 
-  IntId size() const { return size_.load(); }
-
   bool is_valid_id(Id id) const {
     auto index = unpack_index(static_cast<IntId>(id));
     if (index >= CAPACITY) return false;
-    return slots_[index].id.load() == static_cast<IntId>(id);
+    return slots_[index].id.load() ==
+           static_cast<IntId>(id);
   }
 
   template<typename ...Args>
@@ -68,7 +68,9 @@ class BasicIdVector {
     if (auto* slot = acquire_slot()) {
       auto* new_element = reinterpret_cast<Element*>(slot->payload);
       new (new_element) Element(std::forward<Args>(args)...);
-      return {static_cast<Id>(slot->id.load()), new_element};
+      return {static_cast<Id>(
+                  slot->id.load(std::memory_order::memory_order_acquire)),
+              new_element};
     } else {
       return {INVALID_ID, nullptr};
     }
@@ -81,12 +83,12 @@ class BasicIdVector {
 
     auto* new_element = reinterpret_cast<Element*>(slot->payload);
     new (new_element) Element(std::forward<Args>(args)...);
-    return {static_cast<Id>(slot->id.load()), new_element};
+    return {static_cast<Id>(slot->id.load()),
+            new_element};
   }
 
   const Element& operator[](Id id) const {
-    DCHECK(is_valid_id(id)) << static_cast<int>(id) << " "
-                            << static_cast<int>(size_.load());
+    DCHECK(is_valid_id(id)) << static_cast<int>(id);
     return element_at(unpack_index(static_cast<IntId>(id)));
   }
 
@@ -94,8 +96,7 @@ class BasicIdVector {
     auto index = unpack_index(static_cast<IntId>(id));
     DCHECK(is_valid_id(id))
         << static_cast<int>(id) << " "
-        << (index < CAPACITY ? slots_[index].id.load() : 12345678) << " "
-        << static_cast<int>(size_.load());
+        << (index < CAPACITY ? slots_[index].id.load() : 12345678);
     return element_at(unpack_index(static_cast<IntId>(id)));
   }
 
@@ -161,7 +162,8 @@ class BasicIdVector {
 
   bool is_acquired(IntId index) const {
     DCHECK_LT(index, CAPACITY);
-    return unpack_index(slots_[index].id.load()) == index;
+    return unpack_index(slots_[index].id.load()) ==
+           index;
   }
 
   Slot& mark_acquired(IntId index) const {
@@ -187,7 +189,6 @@ class BasicIdVector {
       new_head = increment_tag_and_reset(head_mirror, new_head_index);
     } while (!free_head_.compare_exchange_weak(head_mirror, new_head));
 
-    size_.fetch_add(1);
     return &mark_acquired(head_index);
   }
 
@@ -202,7 +203,6 @@ class BasicIdVector {
       locked->id.store(reset_index(released_id, unpack_index(head_mirror)));
     } while (!free_head_.compare_exchange_weak(head_mirror, new_head));
 
-    size_.fetch_sub(1);
   }
 
   void destroy_elements() {
@@ -212,18 +212,22 @@ class BasicIdVector {
   }
 
   void init_empty() {
-    size_.store(0);
+    // We generate initial tags randomly to make mixups of IDs from different
+    // IdVector-s less likely.
+    std::linear_congruential_engine<uint64_t, 2862933555777941757uL,
+                                    3037000493uL, static_cast<uint64_t>(-1)>
+        tag_generator(reinterpret_cast<uint64_t>(this));
+    auto tag = [&] { return static_cast<IntId>(tag_generator()) & TAG_MASK; };
+
     free_head_.store(0);
     for (IntId i_slot = 0; i_slot < CAPACITY - 1; ++i_slot) {
-      slots_[i_slot].id.store(i_slot + 1);
+      slots_[i_slot].id.store(i_slot + 1 | tag());
     }
-    slots_[CAPACITY - 1].id.store(INVALID);
+    slots_[CAPACITY - 1].id.store(INVALID | tag());
   }
-
 
   Slot* slots_;
   AtomicId free_head_ {INVALID};
-  AtomicId size_ {0};
 };
 
 template <typename E, typename I, size_t IB>

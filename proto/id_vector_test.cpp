@@ -180,7 +180,6 @@ TEST_F(IdVectorTest, LongManyThreadsAddAndRemoveTakes15) {
     for (int i_thread = 0; i_thread < num_threads; ++i_thread) {
       expected_size += all_ids_and_values[i_thread].size();
     }
-    EXPECT_EQ(expected_size, big.size());
     EXPECT_EQ(expected_size, Element::count());
 
     VLOG(1) << "Parallel remove...";
@@ -199,11 +198,9 @@ TEST_F(IdVectorTest, LongManyThreadsAddAndRemoveTakes15) {
     for (auto& thread : threads) thread.join();
     threads.clear();
 
-    EXPECT_EQ(0, big.size());
     EXPECT_EQ(0, Element::count());
 
     big.unsafe_clear();
-    ASSERT_EQ(0, big.size());
     ASSERT_EQ(0, Element::count());
 
     VLOG(1) << "Done.";

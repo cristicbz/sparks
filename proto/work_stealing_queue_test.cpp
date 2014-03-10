@@ -1,4 +1,4 @@
-#include "work_pool.hpp"
+#include "work_stealing_queue.hpp"
 
 #include <atomic>
 #include <thread>
@@ -12,10 +12,10 @@ namespace sparks {
 namespace {
 
 using Element = uint32_t;
-using SmallPool = WorkPool<Element, 2>;
-using LargePool = WorkPool<Element, 24>;
+using SmallPool = WorkStealingQueue<Element, 2>;
+using LargePool = WorkStealingQueue<Element, 24>;
 
-TEST(WorkPoolTest, SingleThreadedUnique) {
+TEST(WorkStealingQueueTest, SingleThreadedUnique) {
   SmallPool small;
   Element to;
 
@@ -45,7 +45,7 @@ TEST(WorkPoolTest, SingleThreadedUnique) {
   EXPECT_TRUE(small.empty());
 }
 
-TEST(WorkPoolTest, SingleThreadedUniqueAndShared) {
+TEST(WorkStealingQueueTest, SingleThreadedUniqueAndShared) {
   SmallPool small;
   Element to;
   EXPECT_FALSE(small.shared_pull(to));
@@ -75,7 +75,7 @@ TEST(WorkPoolTest, SingleThreadedUniqueAndShared) {
   EXPECT_TRUE(small.empty());
 }
 
-TEST(WorkPoolTest, ManyThreads) {
+TEST(WorkStealingQueueTest, ManyThreads) {
   constexpr size_t NUM_ENTRIES = 32;
   constexpr size_t NUM_ITERS = 1 << 18;
   constexpr size_t NUM_THREADS[] = { 2, 3, 4, 6, 9, 13, 24, 32 };

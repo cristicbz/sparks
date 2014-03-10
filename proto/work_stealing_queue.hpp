@@ -1,5 +1,5 @@
-#ifndef SPARKS_CORE_WORK_POOL_
-#define SPARKS_CORE_WORK_POOL_
+#ifndef SPARKS_CORE_WORK_STEALING_QUEUE_HPP_
+#define SPARKS_CORE_WORK_STEALING_QUEUE_HPP_
 
 #include <atomic>
 #include <chrono>
@@ -11,7 +11,7 @@
 namespace sparks {
 
 template <class Element_, size_t CAPACITY_BITS, typename Size_ = uint32_t>
-class WorkPool {
+class WorkStealingQueue {
  public:
   using Element = Element_;
   using Size = Size_;
@@ -32,14 +32,14 @@ class WorkPool {
   static const Size MASK = CAPACITY - 1;
 
  public:
-  WorkPool() : elements_{new Element[CAPACITY]} {}
-  ~WorkPool() { delete[] elements_; }
+  WorkStealingQueue() : elements_{new Element[CAPACITY]} {}
+  ~WorkStealingQueue() { delete[] elements_; }
 
-  WorkPool(const WorkPool&) = delete;
-  WorkPool(WorkPool&&) = delete;
+  WorkStealingQueue(const WorkStealingQueue&) = delete;
+  WorkStealingQueue(WorkStealingQueue&&) = delete;
 
-  WorkPool& operator=(const WorkPool&) = delete;
-  WorkPool& operator=(WorkPool&&) = delete;
+  WorkStealingQueue& operator=(const WorkStealingQueue&) = delete;
+  WorkStealingQueue& operator=(WorkStealingQueue&&) = delete;
 
   bool empty() const { return head_ >= tail_; }
   Size size() const { return tail_ - head_; }
@@ -100,4 +100,4 @@ class WorkPool {
 
 }  // namespace sparks
 
-#endif  // #ifndef SPARKS_CORE_WORK_POOL_
+#endif  // #ifndef SPARKS_CORE_WORK_STEALING_QUEUE_
